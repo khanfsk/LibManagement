@@ -1,0 +1,10 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE members (
+    email CHAR(100),
+    passwd CHAR(100),
+    name CHAR(255) NOT NULL,
+    byear INTEGER,
+    faculty CHAR(100),
+    PRIMARY KEY (email)
+);
