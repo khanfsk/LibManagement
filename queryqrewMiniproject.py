@@ -1,7 +1,8 @@
 import sqlite3
 import sys
 from datetime import date
-
+from datetime import datetime
+import getpass
 
 connection = None
 cursor = None
@@ -36,35 +37,24 @@ def startMenu():
         startMenu()
 
 def login():
-    #users use this to log in to their existing profile
+    global current_user_email  # Add this line
     email = input("Email: ")
-    password = input("Password: ")
-
-    #now, we check if email & password combo is in members(email, passwd)
-    #our cursor now holds the count of instances where there is a match for email and password of users
-    cursor.execute('''
-                   SELECT count(*) FROM members WHERE email=? and passwd=?;
-                   ''', (email, password))
-
+    password = getpass.getpass("Password: ")
+    cursor.execute('SELECT count(*) FROM members WHERE email=? AND passwd=?;', (email, password))
     count = cursor.fetchone()[0]
     
     if count == 1:
-        #this means the password and email acctually have an associated account!
+        current_user_email = email  # This updates the global variable
         return email
-
     else:
-        #this means the email/password are incorrect
-        print("incorrect email/password, please try again.")
+        print("Incorrect email/password, please try again.")
         return None
 
 def register():
-    #Users use this to make a new profile
+    global current_user_email  # Add this line
     print("Please enter your details to register.")
     email = input("Email: ")
-    # Check if the email already exists
-    cursor.execute('''
-		   SELECT count(*) FROM members WHERE email=?;
-		   ''', (email))
+    cursor.execute('SELECT count(*) FROM members WHERE email=?;', (email,))
     count = cursor.fetchone()[0]
 
     if count > 0:
@@ -74,15 +64,14 @@ def register():
         name = input("Name: ")
         byear = input("Birth Year: ")
         faculty = input("Faculty: ")
-        password = input("Password: ")
-        cursor.execute('''
-            INSERT INTO members (email, passwd, name, byear, faculty) VALUES (?, ?, ?, ?, ?);
-                       ''', (email, password, name, byear, faculty))
-        
+        password = getpass.getpass("Password: ")
+        cursor.execute('INSERT INTO members (email, passwd, name, byear, faculty) VALUES (?, ?, ?, ?, ?);', 
+                       (email, password, name, byear, faculty))
         connection.commit()
+        current_user_email = email  # Update the global variable after successful registration
         print("Registration successful!")
         return email
-
+    
 def mainMenu():
     #this function prints out all of the options open to the user after logging in
     global current_user_email
@@ -160,20 +149,29 @@ def displayPersonalInformation(email):
                    ''', (email,))
     info = cursor.fetchone()
     print("\nPersonal Information:")
-    print(f"Name: {info[0]}\nEmail: {info[1]}\nBirth Year: {info[2]}\nFaculty: {info[3]}")
+    print(f"Name: {info[0]}\nEmail: {info[1]}\nBirth Year: {info[2]}\nFaculty: {info[3]}\n")
 
 def displayBorrowingInformation(email):
     cursor.execute('''
         SELECT COUNT(*),
-               (SELECT COUNT(*) FROM borrowings WHERE member=? AND end_date IS NULL) AS current_borrowings,
-               (SELECT COUNT(*) FROM borrowings WHERE member=? AND end_date IS NULL AND julianday('now') - julianday(start_date) > 20) AS overdue_borrowings
+               (SELECT COUNT(*) FROM borrowings WHERE member=? AND end_date IS NULL) AS current_borrowings
         FROM borrowings WHERE member=?;
-    ''', (email, email, email)) #julianday is current day in SQLite
-    info = cursor.fetchone()
+    ''', (email, email))
+
+    total_borrowings, current_borrowings = cursor.fetchone()
+
+    # this query calculates overdue borrowings (without julianday;-;)
+    cursor.execute('''
+        SELECT COUNT(*) FROM borrowings
+        WHERE member=? AND end_date IS NULL
+        AND DATE('now') > DATE(start_date, '+20 days');
+    ''', (email,))
+    overdue_borrowings = cursor.fetchone()[0]
+
     print("\nBorrowing Information:")
-    print(f"Total books borrowed (including returned): {info[0]}")
-    print(f"Current borrowings (unreturned books): {info[1]}")
-    print(f"Overdue borrowings (not returned within the deadline): {info[2]}")
+    print(f"Total books borrowed (including returned): {total_borrowings}")
+    print(f"Current borrowings (unreturned books): {current_borrowings}")
+    print(f"Overdue borrowings (not returned within the deadline): {overdue_borrowings}")
 
 def displayPenaltyInformation(email):
     cursor.execute('''
@@ -190,185 +188,169 @@ def displayPenaltyInformation(email):
 
 def returnBookMenu(email):
     print("Current Borrowings:")
-    #this function is for returning a book 
-    #display current borrowings (list bid, book title, borrwing date, return_deadline) 
     cursor.execute('''
-        SELECT bid, book_id, start_date, (start_date + 20) AS return_deadline
+        SELECT bid, book_id, start_date, 
+        strftime('%Y-%m-%d', start_date, '+20 days') AS return_deadline
         FROM borrowings
-        WHERE bid IN (SELECT bid FROM borrowings WHERE member=?);
-    ''', (email))
-    info = cursor.fetchall()
-    
-    for row in info:
-        print("bid: ", row[0], " book id: ", row[1], " start date: ", row[2], " return deadline: ", row[3])
-    
-    #now that all info is printed, we can ask for a borrowing return
-    bidToReturn = input("\nEnter a bid to return: ")
-    for row in info:
-        if row[0] == bidToReturn:
-            returnBookByBid(bidToReturn, email)
+        WHERE member = ? AND end_date IS NULL;
+    ''', (email,))
+    borrowings= cursor.fetchall()
 
-    #if we are here, it means no valid bid was selected by the user
-    print("Sorry, that is not a valid bid. please enter a valid bid to return a book.")
-    returnBookMenu(email) #loop back to start of the function
+    if not borrowings:
+        print("No current borrowings.")
+        print()
+        mainMenu()
+
+    for borrowing in borrowings:
+        print(f"bid: {borrowing[0]}, book id: {borrowing[1]}, start date: {borrowing[2]}, return deadline: {borrowing[3]}")
+
+    bidToReturn = input("\nEnter a bid to return: ")
+    if any(str(borrowing[0]) == bidToReturn for borrowing in borrowings):
+        returnBookByBid(bidToReturn, email)
+    else:
+        print("Sorry, but you have entered an invalid bid. Please enter a valid bid to return a book.")
+        returnBookMenu(email)
 
 def returnBookByBid(bid, email):
-    #this is the function where the return will happen, given a specific bid
     cursor.execute('''
-        SELECT bid, book_id, start_date, end_date, (start_date + 20) AS return_deadline
-        FROM borrowings
-        WHERE bid =?;
-    ''', (bid))
-    info = cursor.fetchone()
+        SELECT start_date FROM borrowings WHERE bid = ? AND member = ? AND end_date IS NULL;
+    ''', (bid, email))
+    borrowing = cursor.fetchone()
 
-
-            #THIS PART MIGHT NEED CHANGING DEPENDING ON NESSISARY FORMAT FOR DATES!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    todayDate = str(date.today()) #MIGHT NEED TO CHANGE, CURRENTLY LIKE: 2024-03-13
-    
-
-
-    if info[3] == None: #this means that the book has not already been returned , so we need to add an end_date to the respective row
+    if borrowing:
+        todayDate = date.today().isoformat()
         cursor.execute('''
-        UPDATE borrowings SET end_date =?
-        WHERE bid =?;
+            SELECT julianday(?) - julianday(start_date) AS days_passed FROM borrowings WHERE bid = ?;
         ''', (todayDate, bid))
-            #THIS PART MIGHT NEED CHANGING DEPENDING ON NESSISARY FORMAT FOR DATES!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        
-        daysDifference = (info[3]-info[2]).days()
-        if daysDifference > 20: #The book was not returned on time
-            daysLate = daysDifference - 20 #this becomes the penalty amount, like $daysLate
+        days_passed = cursor.fetchone()[0]
 
-            pid = None #(generate a unique pid, do this by doing a query of penalties, sort by pid DESC, take the first one and add one to it)
+        cursor.execute('''
+            UPDATE borrowings SET end_date = ? WHERE bid = ?;
+        ''', (todayDate, bid))
+
+        if days_passed > 20:
+            days_late = days_passed - 20
             cursor.execute('''
-            SELECT pid
-            FROM penalties
-            ORDER BY pid DESC LIMIT 1;
-            ''')
-            row = cursor.fetchone()
-            pid = int(row[0]) + 1 #now our pid is unique!
+                INSERT INTO penalties (bid, amount, paid_amount) VALUES (?, ?, 0);
+            ''', (bid, days_late))
+            print(f"Return processed. Late return penalty applied for {int(days_late)} days overdue.")
+        else:
+            print("Return has been processed, thank you for returning the book on time.")
 
-            #insert a new penalty
-            cursor.execute('''
-            INSERT INTO penalties VALUES
-            (?, ?, ?, ?);
-            ''', (pid, bid, daysLate, 0))
-            print("This is a late return, therfore a penalty has been added to your account. ")
+        # Prompt for a review after return
+        review_choice = input("Would you like to leave a review? (y/n): ").lower()
+        if review_choice == 'y':
+            getReview(bid, email)
 
-        else: #the book was returned on time
-            print("Thank you for returning this book on time!")
-        
-
-        reviewResponse = None
-        while reviewResponse == None:
-            reviewResponse = (input("Would you like to leave a review? Type y for yes, or n for no")).lower()
-            if reviewResponse == "y":
-                getReview(bid, email)
-            elif reviewResponse == "n":
-                mainMenu()
-            else:
-                print("Please enter a valid response")
-                reviewResponse = None
-
-    elif (info[3] != None) or (info[0] == None): #this means an invalid bid was entered
-        print("Please enter a valid bid.")
-        returnBookMenu() #re prints all the valid options, back to returnBookMenu
-
-
+        connection.commit()
+    else:
+        print("Invalid borrowing ID or the book does not belong to the current user.")
+    mainMenu()
 def getReview(bid, email):
-    rating = int(input("Please enter a rating of 1-5: "))
-    if (rating > 5) or (rating < 1):
-        print("Please enter a valid rating.")
-        getReview(bid, email)
-    else: #for valid ratings
-        
-        rtext = input("Please enter the review text: ")
-        
-        rid = None #(generate a unique rid, do this by doing a query of reviews, sort by pid DESC, take the first one and add one to it)
-        cursor.execute('''
-        SELECT rid
-        FROM reviews
-        ORDER BY pid DESC LIMIT 1;
-        ''')
+    cursor.execute("SELECT book_id FROM borrowings WHERE bid = ?", (bid,))
+    result = cursor.fetchone()
+    if result is None:
+        print("Error: No borrowing found for the given BID.")
+        return
+    book_id = result[0]
 
-        row = cursor.fetchone()
-        rid = int(row[0]) + 1 #now our rid is unique!
+    cursor.execute("SELECT * FROM books WHERE book_id = ?", (book_id,))
+    if cursor.fetchone() is None:
+        print(f"Error: No book found with book_id: {book_id}")
+        return
 
-        
-        cursor.execute('''
-        SELECT book_id
-        FROM borrowings
-        WHERE bid =?;
-        ''', (bid))
-        book_id = (cursor.fetchone())[0]
+    # Collecting review details from user
+    try:
+        rating = int(input("Please enter a rating of 1-5: "))
+        if rating < 1 or rating > 5:
+            raise ValueError("Rating must be between 1 and 5.")
+    except ValueError as e:
+        print(e)
+        return
 
-        todayDate = str(date.today()) #MIGHT NEED TO CHANGE, CURRENTLY LIKE: 2024-03-13
+    rtext = input("Please enter the review text: ")
+    todayDate = date.today().strftime('%Y-%m-%d')
 
-        #now we can add the new review into the reviews relation!
-        connection.execute('''
-        INSERT INTO reviews VALUES
-        (?, ?, ?, ?);
-        ''', (rid, book_id, email, rating, rtext, todayDate))
-        connection.commit
-        
-        print("Thank you for the review!")
-        mainMenu()
+    cursor.execute("SELECT MAX(rid) FROM reviews")
+    max_rid = cursor.fetchone()[0]
+    rid = 1 if max_rid is None else max_rid + 1
+
+    cursor.execute('''INSERT INTO reviews (rid, book_id, member, rating, rtext, rdate)
+                      VALUES (?, ?, ?, ?, ?, ?);''', (rid, book_id, email, rating, rtext, todayDate))
+    connection.commit()
+    print("Review added successfully.")
+   
+    mainMenu()
+
 
 def searchForBooks():
     keyword = input("Enter a keyword to search for book/author: ").strip()
+    page_size = 5
     offset = 0
+
     while True:
-        # NOT SURE IF QUERY IS CORRECT!!!!!!
         cursor.execute('''
             SELECT b.book_id, b.title, b.author, b.pyear
             FROM books b
             WHERE b.title LIKE ? OR b.author LIKE ?
             ORDER BY b.title, b.author
-            LIMIT 5 OFFSET ?;
-        ''', ('%' + keyword + '%', '%' + keyword + '%', offset))
+            LIMIT ? OFFSET ?;
+        ''', ('%' + keyword + '%', '%' + keyword + '%', page_size, offset))
 
         books = cursor.fetchall()
 
-        # If no books are found, it just exits the function
         if not books:
-            print("No books found")
-            return 
+            if offset == 0:
+                print("No books found matching your query.")
+            else:
+                print("No more books found.")
+            break
 
         for book in books:
-            # Display book information here, if needed
-            print("Book ID:", book[0])
-            print("Title:", book[1])
-            print("Author:", book[2])
-            print("Publication Year:", book[3])
+            print(f"Book ID: {book[0]}\nTitle: {book[1]}\nAuthor: {book[2]}\nPublication Year: {book[3]}")
             print()
 
-        # If less than 5 books are found, it's the end of the list
-        if len(books) < 5:
-            return 
-        
-        see_more = input("Would you like to see more books? (y/n): ").lower()
-        if see_more != 'y':
-            break 
+        while True:
+            if offset == 0:
+                user_input = input("Enter 'n' for next page, 'e' to exit, or a book ID to borrow: ").lower()
+            else:
+                user_input = input("Enter 'n' for next page, 'p' for previous page, 'e' to exit, or a book ID to borrow: ").lower()
 
-        offset += 5
+            if user_input == 'n':
+                offset += page_size
+                break
+            elif user_input == 'p' and offset >= page_size:
+                offset -= page_size
+                break
+            elif user_input.isdigit():
+                borrowBook(int(user_input))
+                return  # Directly returns after borrowing, simplifying the flow
+            elif user_input == 'e':
+                return  # Exit search
+            else:
+                print("Invalid input, please try again.")
 
-    # Borrowing functionality
-    borrow = input("Would you like to borrow a book (y/n)? ").lower()
-    if borrow == 'y':
-        book_id_to_borrow = input("Enter book ID to borrow: ").strip()
-        if book_id_to_borrow.isdigit():
-            return borrowBook(int(book_id_to_borrow))
+    mainMenu()  # Returns to the main menu after the search is complete or a book is borrowed
 
 def borrowBook(book_id):
+    global current_user_email  # Ensure this is declared globally if you haven't already
+    if not current_user_email:
+        print("You must be logged in to borrow a book.")
+        return
+
     cursor.execute('SELECT COUNT(*) FROM borrowings WHERE book_id = ? AND end_date IS NULL', (book_id,))
     count = cursor.fetchone()[0]
-    if count == 0:
-        cursor.execute('INSERT INTO borrowings (member, book_id, start_date) VALUES (?, ?, DATE("now"))', (current_user_email, book_id))
-        connection.commit()
-        return "Book borrowed successfully."
-    else:
-        return "Book not available."
+    if count > 0:
+        print("This book is currently borrowed.")
+        return
 
+    cursor.execute('INSERT INTO borrowings (member, book_id, start_date) VALUES (?, ?, DATE("now"))', (current_user_email, book_id))
+    connection.commit()
+    print("You have successfully borrowed the book.")
+
+    mainMenu()
 def payPenalty(email):
+    
     # Find unpaid penalties
     cursor.execute('''
         SELECT pid, amount, paid_amount
@@ -381,49 +363,49 @@ def payPenalty(email):
     if not penalties:
         print("No unpaid penalties.")
         return
-    
+
     # Display unpaid penalties
     print("Unpaid Penalties:")
     for penalty in penalties:
         pid, amount, paid_amount = penalty
         print(f"Penalty ID: {pid}, Amount: {amount}, Paid Amount: {paid_amount}")
     
-    # Ask user to select a penalty to pay
-    selected_pid = input("Enter the Penalty ID you want to pay: ")
-    selected_amount = None
-    for penalty in penalties:
-        if penalty[0] == selected_pid:
-            selected_amount = penalty[1]
+    while True:
+        # Ask user to select a penalty to pay
+        selected_pid = input("Enter the Penalty ID you want to pay or 'exit' to return: ")
+        if selected_pid.lower() == 'exit':
             break
-    else:
-        print("Invalid Penalty ID.")
-        return
-    
-    # Ask user to enter payment amount
-    payment_amount = float(input(f"Enter the payment amount for Penalty ID {selected_pid}: "))
-    if payment_amount <= 0:
-        print("Invalid payment amount.")
-        return
 
-    if payment_amount > selected_amount:
-        print("Payment amount exceeds the penalty amount. Please enter a valid payment amount.")
-        return
-    
-    # Update penalty payment
+        selected_pid = int(selected_pid) if selected_pid.isdigit() else None
+        selected_penalty = next((p for p in penalties if p[0] == selected_pid), None)
 
-    new_paid_amount = penalty[2] + payment_amount
+        if selected_penalty:
+            # if the correct penalty is selected, we proceed with payment process
+            pid, amount, paid_amount = selected_penalty
+            try:
+                payment_amount = float(input(f"Enter the payment amount for Penalty ID {selected_pid} (Remaining Amount: {amount - paid_amount}): "))
+                if payment_amount <= 0 or payment_amount + paid_amount > amount:
+                    raise ValueError("Invalid payment amount.")
 
-    cursor.execute('''
-        UPDATE penalties SET paid_amount = ?
-        WHERE pid = ?;
-    ''', (new_paid_amount, selected_pid))
+                new_paid_amount = paid_amount + payment_amount
 
-    connection.commit()
+                cursor.execute('UPDATE penalties SET paid_amount = ? WHERE pid = ?', (new_paid_amount, pid))
+                connection.commit()
 
-    print("Payment successful.")
+                print("Payment successful. Thank you.")
+                break
+            except ValueError as e:
+                print(e)
+        else:
+            print("Invalid Penalty ID. Please try again.")
+    mainMenu()
 
 def main():
-    path = "./register.db"
+    if len(sys.argv) < 2:
+        print("Usage: python script_name.py database_path")
+        sys.exit(1)  # Exit the script with an error status
+
+    path = sys.argv[1]  # Read the database path from command line arguments
     connect(path)
     try:
         startMenu()
